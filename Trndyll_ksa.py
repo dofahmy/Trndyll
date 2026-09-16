@@ -392,13 +392,14 @@ else:
     )
 
 
-async def send_modified_post(channel, message, new_text):
-    """يرسل نفس الميديا إن وجدت، وإلا يرسل النص فقط."""
-    if message.media:
+async def send_modified_post(channel, messages, new_text):
+    """يرسل كل ميديا البوست كألبوم واحد، أو يرسل النص فقط."""
+    media_items = [message.media for message in messages if message.media]
+    if media_items:
         try:
             await client.send_file(
                 channel,
-                message.media,
+                media_items if len(media_items) > 1 else media_items[0],
                 caption=format_discount_codes_html(new_text[:1024]),
                 parse_mode="html",
                 force_document=False,
@@ -414,12 +415,15 @@ async def send_modified_post(channel, message, new_text):
     )
 
 
-async def handle_post(event):
-    message = event.message
-    text = message.message or ""
+async def process_post(event, messages, post_id):
+    """يعالج رسالة منفردة أو ألبومًا كاملًا كوحدة واحدة."""
+    text = next(
+        (message.message for message in messages if message.message),
+        "",
+    )
 
     fingerprint = hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()[:12]
-    message_key = (event.chat_id, message.id, fingerprint)
+    message_key = (event.chat_id, post_id, fingerprint)
     if message_key in _PROCESSED:
         return
     _PROCESSED.add(message_key)
@@ -461,15 +465,33 @@ async def handle_post(event):
 
     for channel in DESTINATION_CHANNELS:
         try:
-            await send_modified_post(channel, message, new_text)
+            await send_modified_post(channel, messages, new_text)
             print(f"   ✅ اتبعت على {channel}")
         except Exception as exc:
             print(f"   ❌ فشل الإرسال على {channel}: {str(exc)[:180]}")
 
 
+async def handle_post(event):
+    message = event.message
+    # عناصر الألبوم تصل أيضًا كرسائل منفردة؛ نتركها لـ handle_album
+    # حتى لا تُرسل صورة واحدة أو يتكرر البوست.
+    if message.grouped_id:
+        return
+    await process_post(event, [message], message.id)
+
+
+async def handle_album(event):
+    messages = list(event.messages)
+    if not messages:
+        return
+    grouped_id = getattr(event, "grouped_id", None) or messages[0].grouped_id
+    await process_post(event, messages, f"album:{grouped_id}")
+
+
 async def run_forwarder():
     client.add_event_handler(handle_post, events.NewMessage(chats=SOURCE_CHANNELS))
     client.add_event_handler(handle_post, events.MessageEdited(chats=SOURCE_CHANNELS))
+    client.add_event_handler(handle_album, events.Album(chats=SOURCE_CHANNELS))
     if not TELEGRAM_STRING_SESSION:
         raise RuntimeError(
             "TELEGRAM_STRING_SESSION غير موجود في Railway Variables. "
