@@ -19,6 +19,7 @@ adjust_adgroup وutm_campaign وlink_userID، ينشئ timestamp جديدًا، 
 
 import asyncio
 import hashlib
+import html
 import os
 import re
 import secrets
@@ -91,6 +92,11 @@ if not SHORT_BASE_URL.startswith("https://"):
 
 LINK_RE = re.compile(r'https?://[^\s\]\)\[\(< >"\'\uFFFC]+'.replace('< >', '<>'))
 TRENDYOL_DOMAINS = ("ty.gl", "trendyol.sa", "trendyol.com")
+STANDALONE_OFFE_RE = re.compile(r"(?<!\w)OFFE(?!\w)", re.UNICODE)
+WHATSAPP_JOIN_LINE = "📞 للانضمام لقناتنا على واتساب (اضغط هنا)"
+DISCOUNT_CODE_RE = re.compile(
+    r"(كود الخصم[^\S\r\n]*[:：][^\S\r\n]*)(\S+)"
+)
 _DB_LOCK = threading.Lock()
 _TIMESTAMP_LOCK = threading.Lock()
 _LAST_TIMESTAMP = 0
@@ -289,6 +295,35 @@ def replace_trendyol_links(text):
     return new_text, converted, errors
 
 
+def clean_post_text(text):
+    """يعدّل كلمة OFFE المستقلة ويحذف سطر الانضمام إلى واتساب."""
+    lines = (text or "").splitlines()
+    kept_lines = [
+        line for line in lines if line.strip() != WHATSAPP_JOIN_LINE
+    ]
+    removed_whatsapp_lines = len(lines) - len(kept_lines)
+    cleaned_text = "\n".join(kept_lines)
+    cleaned_text, offe_replacements = STANDALONE_OFFE_RE.subn(
+        "OFFERZK", cleaned_text
+    )
+    return cleaned_text, offe_replacements, removed_whatsapp_lines
+
+
+def format_discount_codes_html(text):
+    """ينسّق أول كلمة بعد «كود الخصم:» كـ monospace بأمان."""
+    parts = []
+    last_end = 0
+    for match in DISCOUNT_CODE_RE.finditer(text or ""):
+        parts.append(html.escape(text[last_end:match.start()], quote=False))
+        parts.append(html.escape(match.group(1), quote=False))
+        parts.append(
+            f"<code>{html.escape(match.group(2), quote=False)}</code>"
+        )
+        last_end = match.end()
+    parts.append(html.escape((text or "")[last_end:], quote=False))
+    return "".join(parts)
+
+
 # ======================== سيرفر الاختصار ========================
 class ShortLinkHandler(BaseHTTPRequestHandler):
     def respond(self, include_body=True):
@@ -364,13 +399,19 @@ async def send_modified_post(channel, message, new_text):
             await client.send_file(
                 channel,
                 message.media,
-                caption=new_text[:1024],
+                caption=format_discount_codes_html(new_text[:1024]),
+                parse_mode="html",
                 force_document=False,
             )
             return
         except Exception as exc:
             print(f"   ⚠️ تعذر إرسال الميديا مباشرة: {str(exc)[:100]}")
-    await client.send_message(channel, new_text, link_preview=False)
+    await client.send_message(
+        channel,
+        format_discount_codes_html(new_text),
+        parse_mode="html",
+        link_preview=False,
+    )
 
 
 async def handle_post(event):
@@ -401,6 +442,17 @@ async def handle_post(event):
 
     print(f"\n📩 بوست Trendyol من {source_name} — {len(trendyol_urls)} رابط")
     new_text, converted, errors = replace_trendyol_links(text)
+    new_text, offe_replacements, removed_whatsapp_lines = clean_post_text(
+        new_text
+    )
+
+    if offe_replacements:
+        print(f"   ✅ تم تغيير OFFE إلى OFFERZK ({offe_replacements} مرة)")
+    if removed_whatsapp_lines:
+        print(f"   ✅ تم حذف سطر واتساب ({removed_whatsapp_lines} مرة)")
+    discount_code_count = len(DISCOUNT_CODE_RE.findall(new_text))
+    if discount_code_count:
+        print(f"   ✅ تم تنسيق كود الخصم monospace ({discount_code_count} مرة)")
 
     # لا ننشر لو فشل أي رابط، حتى لا يخرج تاج شخص آخر.
     if errors or converted != len(trendyol_urls):
