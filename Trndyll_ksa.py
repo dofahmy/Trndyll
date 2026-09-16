@@ -60,7 +60,7 @@ DEFAULT_SOURCE_CHANNELS = [
     "@OffersSaudiofficial",
 ]
 DEFAULT_DESTINATION_CHANNELS = [
-    "@KSABeso",
+    "@KSAOfferzzz",
 ]
 
 
