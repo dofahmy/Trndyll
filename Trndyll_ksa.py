@@ -95,7 +95,7 @@ TRENDYOL_DOMAINS = ("ty.gl", "trendyol.sa", "trendyol.com")
 STANDALONE_OFFE_RE = re.compile(r"(?<!\w)OFFE(?!\w)", re.UNICODE)
 WHATSAPP_JOIN_LINE = "📞 للانضمام لقناتنا على واتساب (اضغط هنا)"
 DISCOUNT_CODE_RE = re.compile(
-    r"(كود الخصم[^\S\r\n]*[:：][^\S\r\n]*)(\S+)"
+    r"(كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(\S+)"
 )
 _DB_LOCK = threading.Lock()
 _TIMESTAMP_LOCK = threading.Lock()
