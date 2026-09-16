@@ -43,10 +43,16 @@ except Exception:
 
 
 # ======================== الإعدادات ========================
-API_ID = int(os.getenv("TELEGRAM_API_ID", "38880809"))
-API_HASH = os.getenv("TELEGRAM_API_HASH", "9659d4cfc3b7c3476089fb218f57e0fc")
+_API_ID_VALUE = os.getenv("TELEGRAM_API_ID", "").strip()
+API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 TELEGRAM_STRING_SESSION = os.getenv("TELEGRAM_STRING_SESSION", "").strip()
 SESSION_FILE = os.getenv("TELEGRAM_SESSION_FILE", "forwarder_ksa_session")
+
+if not _API_ID_VALUE or not API_HASH:
+    raise RuntimeError(
+        "أضيفي TELEGRAM_API_ID و TELEGRAM_API_HASH في Railway Variables"
+    )
+API_ID = int(_API_ID_VALUE)
 
 # عدّلي القنوات هنا، أو ضعيها في Railway Variables مفصولة بفاصلة.
 DEFAULT_SOURCE_CHANNELS = [
@@ -412,6 +418,11 @@ async def handle_post(event):
 async def run_forwarder():
     client.add_event_handler(handle_post, events.NewMessage(chats=SOURCE_CHANNELS))
     client.add_event_handler(handle_post, events.MessageEdited(chats=SOURCE_CHANNELS))
+    if not TELEGRAM_STRING_SESSION:
+        raise RuntimeError(
+            "TELEGRAM_STRING_SESSION غير موجود في Railway Variables. "
+            "شغّلي generate_telegram_session.py على جهازك وضعي الناتج كمتغير سرّي."
+        )
     await client.start()
     print("=" * 58)
     print("🟠 Trendyol Forwarder شغال")
