@@ -12,7 +12,6 @@ adjust_adgroup وutm_campaign وlink_userID، ينشئ timestamp جديدًا، 
     TRENDYOL_AFFILIATE_ID=236364332
     SHORT_BASE_URL=https://trndyll.com
     SHORT_DB_PATH=/data/trendyol_links.db
-    CUSTOM_EMOJI_PACKS=AnimatedAsianEmoji,BirthdayCollection,NewsEmoji,UnicornEmoji
     PORT=8080
 
 للاحتفاظ بالروابط بعد كل Deploy، أضيفي Railway Volume على /data.
@@ -77,22 +76,6 @@ def _channel_list(env_name, default):
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def _emoji_pack_list(env_name, default):
-    """اقرأ أسماء باكدجات الإيموجي أو روابط t.me/addemoji الكاملة من Variable."""
-    packs = []
-    for item in _channel_list(env_name, default):
-        value = item.strip().rstrip("/")
-        match = re.search(
-            r"(?:https?://)?(?:www\.)?t\.me/addemoji/([^/?#]+)",
-            value,
-            flags=re.IGNORECASE,
-        )
-        short_name = match.group(1) if match else value
-        if short_name and short_name not in packs:
-            packs.append(short_name)
-    return packs
-
-
 SOURCE_CHANNELS = _channel_list("SOURCE_CHANNELS", DEFAULT_SOURCE_CHANNELS)
 DESTINATION_CHANNELS = _channel_list(
     "DESTINATION_CHANNELS", DEFAULT_DESTINATION_CHANNELS
@@ -106,14 +89,9 @@ SHORT_BASE_URL = os.getenv(
 SHORT_DB_PATH = os.getenv("SHORT_DB_PATH", "trendyol_links.db").strip()
 SHORT_CODE_LENGTH = int(os.getenv("SHORT_CODE_LENGTH", "11"))
 WEB_PORT = int(os.getenv("PORT", "8080"))
-CUSTOM_EMOJI_PACKS = _emoji_pack_list(
+CUSTOM_EMOJI_PACKS = _channel_list(
     "CUSTOM_EMOJI_PACKS",
-    [
-        "AnimatedAsianEmoji",
-        "BirthdayCollection",
-        "NewsEmoji",
-        "UnicornEmoji",
-    ],
+    ["CrayonsEmoji", "NewsEmoji", "HeartEm"],
 )
 
 if not TRENDYOL_AFFILIATE_ID.isdigit():
@@ -133,7 +111,6 @@ _TIMESTAMP_LOCK = threading.Lock()
 _LAST_TIMESTAMP = 0
 _PROCESSED = set()
 _CUSTOM_EMOJI_MAP = {}
-_CUSTOM_EMOJI_POOL = []
 
 
 # ======================== قاعدة الروابط ========================
@@ -496,7 +473,6 @@ def _utf16_length(value):
 async def load_custom_emoji_packs():
     """يحمّل الإيموجيز المتاحة من الباكدجات المحددة على Telegram."""
     loaded = {}
-    all_documents = []
     for short_name in CUSTOM_EMOJI_PACKS:
         try:
             sticker_set = await client(
@@ -515,8 +491,6 @@ async def load_custom_emoji_packs():
                     if document_id not in bucket:
                         bucket.append(document_id)
                         pack_count += 1
-                    if document_id not in all_documents:
-                        all_documents.append(document_id)
             print(
                 f"🎨 تم تحميل {pack_count} Custom Emoji من {short_name}"
             )
@@ -526,11 +500,9 @@ async def load_custom_emoji_packs():
             )
     _CUSTOM_EMOJI_MAP.clear()
     _CUSTOM_EMOJI_MAP.update(loaded)
-    _CUSTOM_EMOJI_POOL.clear()
-    _CUSTOM_EMOJI_POOL.extend(all_documents)
     print(
         f"🎨 بدائل Custom Emoji الجاهزة: "
-        f"{len(all_documents)} من الباكدجات المحددة"
+        f"{sum(len(items) for items in loaded.values())}"
     )
 
 
@@ -550,7 +522,7 @@ def build_message_entities(text, include_custom=True):
             )
         )
 
-    if include_custom and _CUSTOM_EMOJI_POOL:
+    if include_custom and _CUSTOM_EMOJI_MAP:
         usage = {}
         for item in emoji_lib.emoji_list(source_text):
             start = item["match_start"]
@@ -561,11 +533,9 @@ def build_message_entities(text, include_custom=True):
             key = _emoji_key(item["emoji"])
             choices = _CUSTOM_EMOJI_MAP.get(key)
             if not choices:
-                choices = _CUSTOM_EMOJI_POOL
-                choice_index = secrets.randbelow(len(choices))
-            else:
-                choice_index = usage.get(key, 0) % len(choices)
-                usage[key] = usage.get(key, 0) + 1
+                continue
+            choice_index = usage.get(key, 0) % len(choices)
+            usage[key] = usage.get(key, 0) + 1
             entities.append(
                 MessageEntityCustomEmoji(
                     offset=_utf16_length(source_text[:start]),
