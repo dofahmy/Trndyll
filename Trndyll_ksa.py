@@ -18,7 +18,6 @@ adjust_adgroup وutm_campaign وlink_userID، ينشئ timestamp جديدًا، 
 """
 
 import asyncio
-import hashlib
 import html
 import os
 import re
@@ -120,6 +119,20 @@ def _db_connect():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS forwarded_posts (
+            source_chat_id TEXT NOT NULL,
+            source_post_id TEXT NOT NULL,
+            destination_channel TEXT NOT NULL,
+            destination_message_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (
+                source_chat_id, source_post_id, destination_channel
+            )
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -162,6 +175,62 @@ def get_short_link(code, count_click=False):
                 )
                 conn.commit()
             return row[0] if row else None
+        finally:
+            conn.close()
+
+
+def save_forwarded_post(
+    source_chat_id, source_post_id, destination_channel, destination_message_id
+):
+    """يحفظ الربط بين بوست المصدر والرسالة المقابلة في قناتنا."""
+    with _DB_LOCK:
+        conn = _db_connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO forwarded_posts(
+                    source_chat_id, source_post_id, destination_channel,
+                    destination_message_id, updated_at
+                ) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(
+                    source_chat_id, source_post_id, destination_channel
+                ) DO UPDATE SET
+                    destination_message_id = excluded.destination_message_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(source_chat_id),
+                    str(source_post_id),
+                    str(destination_channel),
+                    int(destination_message_id),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_forwarded_post(source_chat_id, source_post_id, destination_channel):
+    """يرجع رقم الرسالة التي سبق إرسالها لنعدّلها بدل تكرارها."""
+    with _DB_LOCK:
+        conn = _db_connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT destination_message_id
+                FROM forwarded_posts
+                WHERE source_chat_id = ?
+                  AND source_post_id = ?
+                  AND destination_channel = ?
+                """,
+                (
+                    str(source_chat_id),
+                    str(source_post_id),
+                    str(destination_channel),
+                ),
+            ).fetchone()
+            return int(row[0]) if row else None
         finally:
             conn.close()
 
@@ -463,17 +532,16 @@ async def send_modified_post(channel, messages, new_text):
     media_items = [message.media for message in messages if message.media]
     if media_items:
         try:
-            await client.send_file(
+            return await client.send_file(
                 channel,
                 media_items if len(media_items) > 1 else media_items[0],
                 caption=format_discount_codes_html(new_text[:1024]),
                 parse_mode="html",
                 force_document=False,
             )
-            return
         except Exception as exc:
             print(f"   ⚠️ تعذر إرسال الميديا مباشرة: {str(exc)[:100]}")
-    await client.send_message(
+    return await client.send_message(
         channel,
         format_discount_codes_html(new_text),
         parse_mode="html",
@@ -481,20 +549,41 @@ async def send_modified_post(channel, messages, new_text):
     )
 
 
-async def process_post(event, messages, post_id):
+def sent_message_id(sent_result):
+    """يستخرج رقم أول رسالة؛ وهي صاحبة النص في الألبوم."""
+    if isinstance(sent_result, (list, tuple)):
+        return sent_result[0].id
+    return sent_result.id
+
+
+async def edit_modified_post(channel, destination_message_id, messages, new_text):
+    """يعدّل النص أو وصف الميديا في نفس الرسالة المرسلة سابقًا."""
+    has_media = any(message.media for message in messages)
+    editable_text = new_text[:1024] if has_media else new_text
+    return await client.edit_message(
+        channel,
+        destination_message_id,
+        format_discount_codes_html(editable_text),
+        parse_mode="html",
+        link_preview=False,
+    )
+
+
+async def process_post(event, messages, post_id, is_edit=False):
     """يعالج رسالة منفردة أو ألبومًا كاملًا كوحدة واحدة."""
     text = next(
         (message.message for message in messages if message.message),
         "",
     )
 
-    fingerprint = hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()[:12]
-    message_key = (event.chat_id, post_id, fingerprint)
-    if message_key in _PROCESSED:
-        return
-    _PROCESSED.add(message_key)
-    if len(_PROCESSED) > 5000:
-        _PROCESSED.pop()
+    if not is_edit:
+        # رقم رسالة المصدر وحده هو الهوية لمنع تكرار الإرسال الأول.
+        message_key = (event.chat_id, str(post_id))
+        if message_key in _PROCESSED:
+            return
+        _PROCESSED.add(message_key)
+        if len(_PROCESSED) > 5000:
+            _PROCESSED.pop()
 
     trendyol_urls = [url for url in LINK_RE.findall(text) if is_trendyol_url(url)]
     if not trendyol_urls:
@@ -524,17 +613,42 @@ async def process_post(event, messages, post_id):
     if discount_code_count:
         print(f"   ✅ تم تنسيق كود الخصم monospace ({discount_code_count} مرة)")
 
-    # لا ننشر لو فشل أي رابط، حتى لا يخرج تاج شخص آخر.
+    # لا ننشر لو فشل أي رابط، حتى لا يخرج Affiliate ID لشخص آخر.
     if errors or converted != len(trendyol_urls):
         print("   ⛔ لم يتم إرسال البوست لأن رابطًا واحدًا على الأقل فشل")
         return
 
     for channel in DESTINATION_CHANNELS:
         try:
-            await send_modified_post(channel, messages, new_text)
-            print(f"   ✅ اتبعت على {channel}")
+            if is_edit:
+                destination_message_id = get_forwarded_post(
+                    event.chat_id, post_id, channel
+                )
+                if destination_message_id is None:
+                    print(
+                        f"   ⚠️ لم يُعدّل على {channel}: "
+                        "الرسالة الأصلية غير مسجلة"
+                    )
+                    continue
+                await edit_modified_post(
+                    channel, destination_message_id, messages, new_text
+                )
+                print(f"   ✅ اتعدّل نفس البوست على {channel}")
+            else:
+                sent_result = await send_modified_post(
+                    channel, messages, new_text
+                )
+                destination_message_id = sent_message_id(sent_result)
+                save_forwarded_post(
+                    event.chat_id,
+                    post_id,
+                    channel,
+                    destination_message_id,
+                )
+                print(f"   ✅ اتبعت على {channel}")
         except Exception as exc:
-            print(f"   ❌ فشل الإرسال على {channel}: {str(exc)[:180]}")
+            action = "التعديل" if is_edit else "الإرسال"
+            print(f"   ❌ فشل {action} على {channel}: {str(exc)[:180]}")
 
 
 async def handle_post(event):
@@ -554,10 +668,23 @@ async def handle_album(event):
     await process_post(event, messages, f"album:{grouped_id}")
 
 
+async def handle_edited_post(event):
+    message = event.message
+    post_id = (
+        f"album:{message.grouped_id}"
+        if message.grouped_id
+        else message.id
+    )
+    await process_post(event, [message], post_id, is_edit=True)
+
+
 async def run_forwarder():
     client.add_event_handler(handle_post, events.NewMessage(chats=SOURCE_CHANNELS))
-    client.add_event_handler(handle_post, events.MessageEdited(chats=SOURCE_CHANNELS))
     client.add_event_handler(handle_album, events.Album(chats=SOURCE_CHANNELS))
+    client.add_event_handler(
+        handle_edited_post,
+        events.MessageEdited(chats=SOURCE_CHANNELS),
+    )
     if not TELEGRAM_STRING_SESSION:
         raise RuntimeError(
             "TELEGRAM_STRING_SESSION غير موجود في Railway Variables. "
