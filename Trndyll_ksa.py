@@ -133,6 +133,7 @@ _TIMESTAMP_LOCK = threading.Lock()
 _LAST_TIMESTAMP = 0
 _PROCESSED = set()
 _CUSTOM_EMOJI_MAP = {}
+_CUSTOM_EMOJI_POOL = []
 
 
 # ======================== قاعدة الروابط ========================
@@ -495,6 +496,7 @@ def _utf16_length(value):
 async def load_custom_emoji_packs():
     """يحمّل الإيموجيز المتاحة من الباكدجات المحددة على Telegram."""
     loaded = {}
+    all_documents = []
     for short_name in CUSTOM_EMOJI_PACKS:
         try:
             sticker_set = await client(
@@ -513,6 +515,8 @@ async def load_custom_emoji_packs():
                     if document_id not in bucket:
                         bucket.append(document_id)
                         pack_count += 1
+                    if document_id not in all_documents:
+                        all_documents.append(document_id)
             print(
                 f"🎨 تم تحميل {pack_count} Custom Emoji من {short_name}"
             )
@@ -522,9 +526,11 @@ async def load_custom_emoji_packs():
             )
     _CUSTOM_EMOJI_MAP.clear()
     _CUSTOM_EMOJI_MAP.update(loaded)
+    _CUSTOM_EMOJI_POOL.clear()
+    _CUSTOM_EMOJI_POOL.extend(all_documents)
     print(
         f"🎨 بدائل Custom Emoji الجاهزة: "
-        f"{sum(len(items) for items in loaded.values())}"
+        f"{len(all_documents)} من الباكدجات المحددة"
     )
 
 
@@ -544,7 +550,7 @@ def build_message_entities(text, include_custom=True):
             )
         )
 
-    if include_custom and _CUSTOM_EMOJI_MAP:
+    if include_custom and _CUSTOM_EMOJI_POOL:
         usage = {}
         for item in emoji_lib.emoji_list(source_text):
             start = item["match_start"]
@@ -555,9 +561,11 @@ def build_message_entities(text, include_custom=True):
             key = _emoji_key(item["emoji"])
             choices = _CUSTOM_EMOJI_MAP.get(key)
             if not choices:
-                continue
-            choice_index = usage.get(key, 0) % len(choices)
-            usage[key] = usage.get(key, 0) + 1
+                choices = _CUSTOM_EMOJI_POOL
+                choice_index = secrets.randbelow(len(choices))
+            else:
+                choice_index = usage.get(key, 0) % len(choices)
+                usage[key] = usage.get(key, 0) + 1
             entities.append(
                 MessageEntityCustomEmoji(
                     offset=_utf16_length(source_text[:start]),
