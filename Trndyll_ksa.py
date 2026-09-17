@@ -18,7 +18,6 @@ adjust_adgroup وutm_campaign وlink_userID، ينشئ timestamp جديدًا، 
 """
 
 import asyncio
-import html
 import os
 import re
 import secrets
@@ -31,9 +30,16 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+import emoji as emoji_lib
 import requests
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.functions.messages import GetStickerSetRequest
+from telethon.tl.types import (
+    InputStickerSetShortName,
+    MessageEntityCode,
+    MessageEntityCustomEmoji,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -83,6 +89,10 @@ SHORT_BASE_URL = os.getenv(
 SHORT_DB_PATH = os.getenv("SHORT_DB_PATH", "trendyol_links.db").strip()
 SHORT_CODE_LENGTH = int(os.getenv("SHORT_CODE_LENGTH", "11"))
 WEB_PORT = int(os.getenv("PORT", "8080"))
+CUSTOM_EMOJI_PACKS = _channel_list(
+    "CUSTOM_EMOJI_PACKS",
+    ["CrayonsEmoji", "NewsEmoji", "HeartEm"],
+)
 
 if not TRENDYOL_AFFILIATE_ID.isdigit():
     raise ValueError("TRENDYOL_AFFILIATE_ID لازم يكون أرقام فقط")
@@ -100,6 +110,7 @@ _DB_LOCK = threading.Lock()
 _TIMESTAMP_LOCK = threading.Lock()
 _LAST_TIMESTAMP = 0
 _PROCESSED = set()
+_CUSTOM_EMOJI_MAP = {}
 
 
 # ======================== قاعدة الروابط ========================
@@ -444,19 +455,97 @@ def clean_post_text(text):
     return cleaned_text, offe_replacements, removed_whatsapp_lines
 
 
-def format_discount_codes_html(text):
-    """ينسّق أول كلمة بعد «كود الخصم:» كـ monospace بأمان."""
-    parts = []
-    last_end = 0
-    for match in DISCOUNT_CODE_RE.finditer(text or ""):
-        parts.append(html.escape(text[last_end:match.start()], quote=False))
-        parts.append(html.escape(match.group(1), quote=False))
-        parts.append(
-            f"<code>{html.escape(match.group(2), quote=False)}</code>"
+def _emoji_key(value):
+    """يوحّد شكل الإيموجي للمطابقة مع بديله داخل الباكدج."""
+    return "".join(
+        char
+        for char in value
+        if char not in ("\ufe0e", "\ufe0f")
+        and not ("\U0001f3fb" <= char <= "\U0001f3ff")
+    )
+
+
+def _utf16_length(value):
+    """Telegram يحسب مواقع التنسيق بوحدات UTF-16."""
+    return len(value.encode("utf-16-le")) // 2
+
+
+async def load_custom_emoji_packs():
+    """يحمّل الإيموجيز المتاحة من الباكدجات المحددة على Telegram."""
+    loaded = {}
+    for short_name in CUSTOM_EMOJI_PACKS:
+        try:
+            sticker_set = await client(
+                GetStickerSetRequest(
+                    InputStickerSetShortName(short_name),
+                    hash=0,
+                )
+            )
+            pack_count = 0
+            for sticker_pack in getattr(sticker_set, "packs", []):
+                key = _emoji_key(sticker_pack.emoticon)
+                if not key:
+                    continue
+                bucket = loaded.setdefault(key, [])
+                for document_id in sticker_pack.documents:
+                    if document_id not in bucket:
+                        bucket.append(document_id)
+                        pack_count += 1
+            print(
+                f"🎨 تم تحميل {pack_count} Custom Emoji من {short_name}"
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ تعذر تحميل باكدج {short_name}: {str(exc)[:160]}"
+            )
+    _CUSTOM_EMOJI_MAP.clear()
+    _CUSTOM_EMOJI_MAP.update(loaded)
+    print(
+        f"🎨 بدائل Custom Emoji الجاهزة: "
+        f"{sum(len(items) for items in loaded.values())}"
+    )
+
+
+def build_message_entities(text, include_custom=True):
+    """يبني تنسيق كود الخصم وبدائل الـCustom Emoji للنص."""
+    source_text = text or ""
+    entities = []
+    protected_ranges = []
+
+    for match in DISCOUNT_CODE_RE.finditer(source_text):
+        start, end = match.span(2)
+        protected_ranges.append((start, end))
+        entities.append(
+            MessageEntityCode(
+                offset=_utf16_length(source_text[:start]),
+                length=_utf16_length(source_text[start:end]),
+            )
         )
-        last_end = match.end()
-    parts.append(html.escape((text or "")[last_end:], quote=False))
-    return "".join(parts)
+
+    if include_custom and _CUSTOM_EMOJI_MAP:
+        usage = {}
+        for item in emoji_lib.emoji_list(source_text):
+            start = item["match_start"]
+            end = item["match_end"]
+            if any(start < protected_end and end > protected_start
+                   for protected_start, protected_end in protected_ranges):
+                continue
+            key = _emoji_key(item["emoji"])
+            choices = _CUSTOM_EMOJI_MAP.get(key)
+            if not choices:
+                continue
+            choice_index = usage.get(key, 0) % len(choices)
+            usage[key] = usage.get(key, 0) + 1
+            entities.append(
+                MessageEntityCustomEmoji(
+                    offset=_utf16_length(source_text[:start]),
+                    length=_utf16_length(source_text[start:end]),
+                    document_id=choices[choice_index],
+                )
+            )
+
+    entities.sort(key=lambda entity: entity.offset)
+    return entities
 
 
 # ======================== سيرفر الاختصار ========================
@@ -531,22 +620,68 @@ async def send_modified_post(channel, messages, new_text):
     """يرسل كل ميديا البوست كألبوم واحد، أو يرسل النص فقط."""
     media_items = [message.media for message in messages if message.media]
     if media_items:
+        caption = new_text[:1024]
+        files = media_items if len(media_items) > 1 else media_items[0]
+
+        def album_payload(include_custom):
+            entities = build_message_entities(caption, include_custom)
+            if len(media_items) == 1:
+                return caption, entities
+            return (
+                [caption] + [""] * (len(media_items) - 1),
+                [entities] + [[] for _ in media_items[1:]],
+            )
+
         try:
+            captions, formatting_entities = album_payload(True)
             return await client.send_file(
                 channel,
-                media_items if len(media_items) > 1 else media_items[0],
-                caption=format_discount_codes_html(new_text[:1024]),
-                parse_mode="html",
+                files,
+                caption=captions,
+                formatting_entities=formatting_entities,
                 force_document=False,
             )
         except Exception as exc:
-            print(f"   ⚠️ تعذر إرسال الميديا مباشرة: {str(exc)[:100]}")
-    return await client.send_message(
-        channel,
-        format_discount_codes_html(new_text),
-        parse_mode="html",
-        link_preview=False,
-    )
+            if _CUSTOM_EMOJI_MAP:
+                print(
+                    "   ⚠️ تعذر Custom Emoji؛ إعادة المحاولة "
+                    f"بالإيموجي العادي: {str(exc)[:100]}"
+                )
+                try:
+                    captions, formatting_entities = album_payload(False)
+                    return await client.send_file(
+                        channel,
+                        files,
+                        caption=captions,
+                        formatting_entities=formatting_entities,
+                        force_document=False,
+                    )
+                except Exception as fallback_exc:
+                    print(
+                        "   ⚠️ تعذر إرسال الميديا مباشرة: "
+                        f"{str(fallback_exc)[:100]}"
+                    )
+            else:
+                print(
+                    f"   ⚠️ تعذر إرسال الميديا مباشرة: {str(exc)[:100]}"
+                )
+
+    try:
+        return await client.send_message(
+            channel,
+            new_text,
+            formatting_entities=build_message_entities(new_text, True),
+            link_preview=False,
+        )
+    except Exception:
+        if not _CUSTOM_EMOJI_MAP:
+            raise
+        return await client.send_message(
+            channel,
+            new_text,
+            formatting_entities=build_message_entities(new_text, False),
+            link_preview=False,
+        )
 
 
 def sent_message_id(sent_result):
@@ -560,13 +695,24 @@ async def edit_modified_post(channel, destination_message_id, messages, new_text
     """يعدّل النص أو وصف الميديا في نفس الرسالة المرسلة سابقًا."""
     has_media = any(message.media for message in messages)
     editable_text = new_text[:1024] if has_media else new_text
-    return await client.edit_message(
-        channel,
-        destination_message_id,
-        format_discount_codes_html(editable_text),
-        parse_mode="html",
-        link_preview=False,
-    )
+    try:
+        return await client.edit_message(
+            channel,
+            destination_message_id,
+            editable_text,
+            formatting_entities=build_message_entities(editable_text, True),
+            link_preview=False,
+        )
+    except Exception:
+        if not _CUSTOM_EMOJI_MAP:
+            raise
+        return await client.edit_message(
+            channel,
+            destination_message_id,
+            editable_text,
+            formatting_entities=build_message_entities(editable_text, False),
+            link_preview=False,
+        )
 
 
 async def process_post(event, messages, post_id, is_edit=False):
@@ -691,6 +837,7 @@ async def run_forwarder():
             "شغّلي generate_telegram_session.py على جهازك وضعي الناتج كمتغير سرّي."
         )
     await client.start()
+    await load_custom_emoji_packs()
     print("=" * 58)
     print("🟠 Trendyol Forwarder شغال")
     print(f"رقم الأفلييت: {TRENDYOL_AFFILIATE_ID}")
