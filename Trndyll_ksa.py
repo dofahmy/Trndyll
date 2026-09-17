@@ -30,7 +30,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
 from telethon import TelegramClient, events
@@ -192,26 +192,49 @@ def expand_trendyol_url(url):
     last_error = None
     for attempt in range(3):
         try:
-            response = requests.get(
-                url,
-                allow_redirects=True,
-                timeout=20,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 Chrome/152 Safari/537.36"
-                    ),
-                    "Accept-Language": "ar-SA,ar;q=0.9,en;q=0.8",
-                },
-            )
-            response.raise_for_status()
-            final_url = response.url
-            final_host = (urlsplit(final_url).hostname or "").lower()
-            if "trendyol." not in final_host:
-                raise ValueError(
-                    f"رابط ty.gl حوّل إلى دومين غير Trendyol: {final_host}"
+            current_url = url
+            for _hop in range(6):
+                current_parts = urlsplit(current_url)
+                current_host = (current_parts.hostname or "").lower()
+                if "trendyol." in current_host:
+                    return current_url
+
+                current_query = dict(
+                    parse_qsl(current_parts.query, keep_blank_values=True)
                 )
-            return final_url
+                adjusted_target = current_query.get("adjust_redirect", "")
+                adjusted_host = (
+                    urlsplit(adjusted_target).hostname or ""
+                ).lower()
+                if adjusted_target and "trendyol." in adjusted_host:
+                    return adjusted_target
+
+                with requests.get(
+                    current_url,
+                    allow_redirects=False,
+                    timeout=12,
+                    stream=True,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 Chrome/152 Safari/537.36"
+                        ),
+                        "Accept-Language": "ar-SA,ar;q=0.9,en;q=0.8",
+                    },
+                ) as response:
+                    if 300 <= response.status_code < 400:
+                        location = response.headers.get("Location", "")
+                        if not location:
+                            raise ValueError("تحويل ty.gl لا يحتوي على وجهة")
+                        current_url = urljoin(current_url, location)
+                        continue
+                    response.raise_for_status()
+                    current_url = response.url
+
+            final_host = (urlsplit(current_url).hostname or "").lower()
+            raise ValueError(
+                f"رابط ty.gl لم يصل إلى Trendyol: {final_host}"
+            )
         except Exception as exc:
             last_error = exc
             if attempt < 2:
@@ -219,9 +242,29 @@ def expand_trendyol_url(url):
     raise RuntimeError(f"تعذر فك رابط ty.gl: {last_error}")
 
 
+def normalize_trendyol_destination(url):
+    """يحوّل رابط اختيار الدولة إلى رابط Trendyol السعودية الداخلي."""
+    parts = urlsplit(url)
+    if parts.path.rstrip("/").endswith("/select-country"):
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        callback = query.get("cb", "")
+        if callback:
+            callback_parts = urlsplit(callback)
+            return urlunsplit(
+                (
+                    "https",
+                    "www.trendyol.sa",
+                    callback_parts.path,
+                    callback_parts.query,
+                    callback_parts.fragment,
+                )
+            )
+    return url
+
+
 def retag_trendyol_url(url):
     """يغيّر حقول التتبع فقط ولا يلمس المنتج أو التاجر أو الحملة."""
-    final_url = expand_trendyol_url(url)
+    final_url = normalize_trendyol_destination(expand_trendyol_url(url))
     parts = urlsplit(final_url)
     host = (parts.hostname or "").lower()
     if "trendyol." not in host:
@@ -271,28 +314,51 @@ def create_short_link(long_url):
             continue
 
 
-def replace_trendyol_links(text):
+def convert_one_trendyol_link(original_url):
+    """يفك ويعيد وسم ويختصر رابطًا واحدًا داخل thread مستقل."""
+    try:
+        long_url = retag_trendyol_url(original_url)
+        short_url = create_short_link(long_url)
+        print(f"   ✅ رابط Trendyol الجديد: {short_url}")
+        return short_url, None
+    except Exception as exc:
+        error = str(exc)
+        print(f"   ❌ فشل الرابط: {error[:180]}")
+        return original_url, error
+
+
+async def replace_trendyol_links(text):
+    """يحوّل كل روابط البوست بالتوازي مع الحفاظ على ترتيبها في النص."""
+    source_text = text or ""
+    matches = [
+        match
+        for match in LINK_RE.finditer(source_text)
+        if is_trendyol_url(match.group(0))
+    ]
+    if not matches:
+        return source_text, 0, []
+
+    results = await asyncio.gather(
+        *(
+            asyncio.to_thread(convert_one_trendyol_link, match.group(0))
+            for match in matches
+        )
+    )
+
+    parts = []
+    last_end = 0
     converted = 0
     errors = []
-
-    def replace(match):
-        nonlocal converted
-        original_url = match.group(0)
-        if not is_trendyol_url(original_url):
-            return original_url
-        try:
-            long_url = retag_trendyol_url(original_url)
-            short_url = create_short_link(long_url)
+    for match, (replacement, error) in zip(matches, results):
+        parts.append(source_text[last_end:match.start()])
+        parts.append(replacement)
+        last_end = match.end()
+        if error:
+            errors.append(error)
+        else:
             converted += 1
-            print(f"   ✅ رابط Trendyol الجديد: {short_url}")
-            return short_url
-        except Exception as exc:
-            errors.append(str(exc))
-            print(f"   ❌ فشل الرابط: {str(exc)[:180]}")
-            return original_url
-
-    new_text = LINK_RE.sub(replace, text or "")
-    return new_text, converted, errors
+    parts.append(source_text[last_end:])
+    return "".join(parts), converted, errors
 
 
 def clean_post_text(text):
@@ -445,7 +511,7 @@ async def process_post(event, messages, post_id):
         source_name = str(event.chat_id)
 
     print(f"\n📩 بوست Trendyol من {source_name} — {len(trendyol_urls)} رابط")
-    new_text, converted, errors = replace_trendyol_links(text)
+    new_text, converted, errors = await replace_trendyol_links(text)
     new_text, offe_replacements, removed_whatsapp_lines = clean_post_text(
         new_text
     )
