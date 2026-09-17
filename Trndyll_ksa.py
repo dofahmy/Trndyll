@@ -12,6 +12,7 @@ adjust_adgroup وutm_campaign وlink_userID، ينشئ timestamp جديدًا، 
     TRENDYOL_AFFILIATE_ID=236364332
     SHORT_BASE_URL=https://trndyll.com
     SHORT_DB_PATH=/data/trendyol_links.db
+    CUSTOM_EMOJI_PACKS=AnimatedAsianEmoji,BirthdayCollection,NewsEmoji,UnicornEmoji
     PORT=8080
 
 للاحتفاظ بالروابط بعد كل Deploy، أضيفي Railway Volume على /data.
@@ -76,6 +77,22 @@ def _channel_list(env_name, default):
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _emoji_pack_list(env_name, default):
+    """اقرأ أسماء باكدجات الإيموجي أو روابط t.me/addemoji الكاملة من Variable."""
+    packs = []
+    for item in _channel_list(env_name, default):
+        value = item.strip().rstrip("/")
+        match = re.search(
+            r"(?:https?://)?(?:www\.)?t\.me/addemoji/([^/?#]+)",
+            value,
+            flags=re.IGNORECASE,
+        )
+        short_name = match.group(1) if match else value
+        if short_name and short_name not in packs:
+            packs.append(short_name)
+    return packs
+
+
 SOURCE_CHANNELS = _channel_list("SOURCE_CHANNELS", DEFAULT_SOURCE_CHANNELS)
 DESTINATION_CHANNELS = _channel_list(
     "DESTINATION_CHANNELS", DEFAULT_DESTINATION_CHANNELS
@@ -89,9 +106,14 @@ SHORT_BASE_URL = os.getenv(
 SHORT_DB_PATH = os.getenv("SHORT_DB_PATH", "trendyol_links.db").strip()
 SHORT_CODE_LENGTH = int(os.getenv("SHORT_CODE_LENGTH", "11"))
 WEB_PORT = int(os.getenv("PORT", "8080"))
-CUSTOM_EMOJI_PACKS = _channel_list(
+CUSTOM_EMOJI_PACKS = _emoji_pack_list(
     "CUSTOM_EMOJI_PACKS",
-    ["CrayonsEmoji", "NewsEmoji", "HeartEm"],
+    [
+        "AnimatedAsianEmoji",
+        "BirthdayCollection",
+        "NewsEmoji",
+        "UnicornEmoji",
+    ],
 )
 
 if not TRENDYOL_AFFILIATE_ID.isdigit():
