@@ -93,16 +93,22 @@ async def main():
         )
         # reverse=False هو ترتيب Telegram الطبيعي: من الأحدث إلى الأقدم.
         # max_id غير شامل، لذلك نضيف 1 لكي يبدأ من START_MESSAGE_ID نفسه.
+        # Telethon مع max_id قد لا يعيد START_MESSAGE_ID بالطريقة المتوقعة.
+        # نبدأ من أحدث رسائل القناة، ونتجاهل أي ID أعلى من نقطة البداية،
+        # وبذلك يكون المرور مؤكدًا: 17116 ثم 17115 ثم 17114 ... إلخ.
         async for msg in client.iter_messages(
             channel,
             limit=None,
-            max_id=START_MESSAGE_ID + 1,
             reverse=False,
         ):
+            if msg.id > START_MESSAGE_ID:
+                continue
             if msg.date and msg.date < cutoff:
                 print(f"  وصلنا لحد الأسبوع: {msg.date.isoformat()} — توقف.")
                 break
             total_checked += 1
+            if total_checked == 1:
+                print(f"  ▶️ أول رسالة تم فحصها فعلًا: {msg.id}")
             old_text = msg.message or ""
             if not old_text or not LINE_RE.search(old_text):
                 continue
