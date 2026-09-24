@@ -3,6 +3,8 @@ import asyncio
 import os
 import re
 from telethon import TelegramClient
+from telethon.errors import MessageNotModifiedError
+from telethon.tl.types import MessageEntityCode
 from telethon.sessions import StringSession
 
 _API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
@@ -35,13 +37,39 @@ def fix_text(text):
             final.append("KSA15")
         if OUR_CODE.upper() not in {x.upper() for x in final}:
             final.append(OUR_CODE)
-        new_line = match.group("prefix") + " ".join(f"`{x}`" for x in final)
-        if new_line != match.group(0):
-            changed = True
+        # Telegram may return the visible text without Markdown backticks even when
+        # the codes are already monospace entities. Compare the actual code values,
+        # not the literal backticks, to avoid MessageNotModified errors.
+        current_codes = [x.upper() for x in tokens]
+        wanted_codes = [x.upper() for x in final]
+        if current_codes == wanted_codes:
+            return match.group(0)
+
+        new_line = match.group("prefix") + " ".join(final)
+        changed = True
         return new_line
 
     new_text = LINE_RE.sub(repl, text or "")
     return new_text, changed
+
+def utf16_len(value):
+    return len(value.encode("utf-16-le")) // 2
+
+def discount_entities(text):
+    entities = []
+    for match in LINE_RE.finditer(text or ""):
+        code_area = match.group("codes") or ""
+        area_start = match.start("codes")
+        for token_match in TOKEN_RE.finditer(code_area):
+            start = area_start + token_match.start()
+            end = area_start + token_match.end()
+            entities.append(
+                MessageEntityCode(
+                    offset=utf16_len(text[:start]),
+                    length=utf16_len(text[start:end]),
+                )
+            )
+    return entities
 
 async def main():
     if not _API_ID or not API_HASH or not SESSION:
@@ -84,10 +112,18 @@ async def main():
                 continue
 
             try:
-                await client.edit_message(channel, msg.id, new_text)
+                await client.edit_message(
+                    channel,
+                    msg.id,
+                    new_text,
+                    formatting_entities=discount_entities(new_text),
+                    link_preview=False,
+                )
                 total_changed += 1
                 print(f"  OK message_id={msg.id}")
                 await asyncio.sleep(0.8)
+            except MessageNotModifiedError:
+                print(f"  SKIP message_id={msg.id} — الأكواد صحيحة بالفعل")
             except Exception as exc:
                 total_failed += 1
                 print(f"  FAIL message_id={msg.id}: {exc}")
