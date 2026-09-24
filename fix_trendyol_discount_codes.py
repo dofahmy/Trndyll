@@ -11,7 +11,8 @@ _API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
 API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 SESSION = os.getenv("TELEGRAM_STRING_SESSION", "").strip()
 OUR_CODE = os.getenv("TRENDYOL_DISCOUNT_CODE", "OFFERZK").strip() or "OFFERZK"
-PUBLIC_CODES = {"KSA15"}
+PUBLIC_CODES = {"KSA15", "3VOC15"}
+REPLACE_CODES = {"ARWA15", "OFFE"}
 CHANNELS = [
     x.strip()
     for x in os.getenv("DESTINATION_CHANNELS", "@KSAOfferzzz").split(",")
@@ -31,23 +32,38 @@ def fix_text(text):
     def repl(match):
         nonlocal changed
         tokens = TOKEN_RE.findall(match.group("codes") or "")
-        uppers = {x.upper() for x in tokens}
-        final = []
-        if "KSA15" in uppers:
-            final.append("KSA15")
-        if OUR_CODE.upper() not in {x.upper() for x in final}:
-            final.append(OUR_CODE)
-        # Telegram may return the visible text without Markdown backticks even when
-        # the codes are already monospace entities. Compare the actual code values,
-        # not the literal backticks, to avoid MessageNotModified errors.
-        current_codes = [x.upper() for x in tokens]
-        wanted_codes = [x.upper() for x in final]
-        if current_codes == wanted_codes:
+        if not tokens:
             return match.group(0)
 
-        new_line = match.group("prefix") + " - ".join(final)
+        final = []
+        replaced = False
+        our_added = False
+
+        for token in tokens:
+            upper = token.upper()
+            if upper in REPLACE_CODES:
+                replaced = True
+                if not our_added and OUR_CODE.upper() not in {
+                    x.upper() for x in final
+                }:
+                    final.append(OUR_CODE)
+                    our_added = True
+                continue
+
+            if upper == OUR_CODE.upper():
+                if not our_added:
+                    final.append(OUR_CODE)
+                    our_added = True
+                continue
+
+            if upper not in {x.upper() for x in final}:
+                final.append(token)
+
+        if not replaced:
+            return match.group(0)
+
         changed = True
-        return new_line
+        return match.group("prefix") + " - ".join(final)
 
     new_text = LINE_RE.sub(repl, text or "")
     return new_text, changed
@@ -80,7 +96,8 @@ async def main():
     client = TelegramClient(StringSession(SESSION), int(_API_ID), API_HASH)
     await client.start()
     print(f"الكود الخاص بنا: {OUR_CODE}")
-    print("الكود العام الوحيد المحفوظ: KSA15")
+    print("الأكواد العامة المحفوظة: KSA15, 3VOC15")
+    print("الاستبدال فقط: ARWA15, OFFE -> " + OUR_CODE)
 
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)

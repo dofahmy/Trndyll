@@ -103,7 +103,8 @@ LINK_RE = re.compile(r'https?://[^\s\]\)\[\(< >"\'\uFFFC]+'.replace('< >', '<>')
 TRENDYOL_DOMAINS = ("ty.gl", "trendyol.sa", "trendyol.com")
 STANDALONE_OFFE_RE = re.compile(r"(?<!\w)OFFE(?!\w)", re.UNICODE)
 WHATSAPP_JOIN_LINE = "📞 للانضمام لقناتنا على واتساب (اضغط هنا)"
-PUBLIC_DISCOUNT_CODES = {"KSA15"}
+PUBLIC_DISCOUNT_CODES = {"KSA15", "3VOC15"}
+REPLACE_DISCOUNT_CODES = {"ARWA15", "OFFE"}
 OUR_DISCOUNT_CODE = os.getenv("TRENDYOL_DISCOUNT_CODE", "OFFERZK").strip() or "OFFERZK"
 DISCOUNT_LINE_RE = re.compile(
     r"(?im)^(?P<prefix>\s*كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(?P<codes>[^\r\n]*)$"
@@ -448,28 +449,49 @@ async def replace_trendyol_links(text):
 
 
 def normalize_discount_codes(text):
-    """يحافظ فقط على KSA15 ويضيف كودنا، ويجعل كل كود monospace مستقلًا."""
+    """يستبدل فقط ARWA15 وOFFE بكودنا، ويحافظ على أي أكواد أخرى كما هي."""
     changed_lines = 0
 
     def replace_line(match):
         nonlocal changed_lines
         raw_codes = match.group("codes") or ""
         tokens = DISCOUNT_TOKEN_RE.findall(raw_codes)
-        upper_tokens = {token.upper() for token in tokens}
+        if not tokens:
+            return match.group(0)
 
         final_codes = []
-        if "KSA15" in upper_tokens:
-            final_codes.append("KSA15")
-        if OUR_DISCOUNT_CODE.upper() not in {code.upper() for code in final_codes}:
-            final_codes.append(OUR_DISCOUNT_CODE)
+        replaced = False
+        our_added = False
+
+        for token in tokens:
+            upper = token.upper()
+            if upper in REPLACE_DISCOUNT_CODES:
+                replaced = True
+                if not our_added and OUR_DISCOUNT_CODE.upper() not in {
+                    code.upper() for code in final_codes
+                }:
+                    final_codes.append(OUR_DISCOUNT_CODE)
+                    our_added = True
+                continue
+
+            if upper == OUR_DISCOUNT_CODE.upper():
+                if not our_added:
+                    final_codes.append(OUR_DISCOUNT_CODE)
+                    our_added = True
+                continue
+
+            # نحافظ على KSA15 و3VOC15 وأي كود آخر غير مستهدف كما هو.
+            if upper not in {code.upper() for code in final_codes}:
+                final_codes.append(token)
+
+        if not replaced:
+            return match.group(0)
 
         replacement = match.group("prefix") + " - ".join(final_codes)
-        if replacement != match.group(0):
-            changed_lines += 1
+        changed_lines += 1
         return replacement
 
     return DISCOUNT_LINE_RE.sub(replace_line, text or ""), changed_lines
-
 
 def clean_post_text(text):
     """يعدّل كلمة OFFE المستقلة ويحذف سطر الانضمام إلى واتساب."""
@@ -784,8 +806,8 @@ async def process_post(event, messages, post_id, is_edit=False):
 
     if discount_code_replacements:
         print(
-            f"   ✅ تم توحيد أكواد الخصم: الاحتفاظ بـ KSA15 إن وُجد "
-            f"+ إضافة {OUR_DISCOUNT_CODE} ({discount_code_replacements} سطر)"
+            f"   ✅ تم استبدال ARWA15/OFFE بـ {OUR_DISCOUNT_CODE} فقط "
+            f"مع الحفاظ على باقي الأكواد ({discount_code_replacements} سطر)"
         )
     if offe_replacements:
         print(f"   ✅ تم تغيير OFFE إلى OFFERZK ({offe_replacements} مرة)")
