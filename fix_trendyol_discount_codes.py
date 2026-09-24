@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+import asyncio
+import os
+import re
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+
+_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
+API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+SESSION = os.getenv("TELEGRAM_STRING_SESSION", "").strip()
+OUR_CODE = os.getenv("TRENDYOL_DISCOUNT_CODE", "OFFERZK").strip() or "OFFERZK"
+PUBLIC_CODES = {"KSA15"}
+CHANNELS = [
+    x.strip()
+    for x in os.getenv("DESTINATION_CHANNELS", "@KSAOfferzzz").split(",")
+    if x.strip()
+]
+LIMIT = int(os.getenv("FIX_CODES_LIMIT", "0"))  # 0 = كل البوستات المتاحة
+
+LINE_RE = re.compile(
+    r"(?im)^(?P<prefix>\s*كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(?P<codes>[^\r\n]*)$"
+)
+TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+def fix_text(text):
+    changed = False
+
+    def repl(match):
+        nonlocal changed
+        tokens = TOKEN_RE.findall(match.group("codes") or "")
+        uppers = {x.upper() for x in tokens}
+        final = []
+        if "KSA15" in uppers:
+            final.append("KSA15")
+        if OUR_CODE.upper() not in {x.upper() for x in final}:
+            final.append(OUR_CODE)
+        new_line = match.group("prefix") + " ".join(f"`{x}`" for x in final)
+        if new_line != match.group(0):
+            changed = True
+        return new_line
+
+    new_text = LINE_RE.sub(repl, text or "")
+    return new_text, changed
+
+async def main():
+    if not _API_ID or not API_HASH or not SESSION:
+        raise RuntimeError(
+            "لازم TELEGRAM_API_ID و TELEGRAM_API_HASH و TELEGRAM_STRING_SESSION يكونوا موجودين."
+        )
+
+    client = TelegramClient(StringSession(SESSION), int(_API_ID), API_HASH)
+    await client.start()
+    print(f"الكود الخاص بنا: {OUR_CODE}")
+    print("الكود العام الوحيد المحفوظ: KSA15")
+
+    total_checked = total_changed = total_failed = 0
+    for channel in CHANNELS:
+        print(f"\nفحص {channel} ...")
+        async for msg in client.iter_messages(channel, limit=(LIMIT or None)):
+            total_checked += 1
+            old_text = msg.message or ""
+            if not old_text or not LINE_RE.search(old_text):
+                continue
+
+            new_text, changed = fix_text(old_text)
+            if not changed:
+                continue
+
+            try:
+                await client.edit_message(channel, msg.id, new_text)
+                total_changed += 1
+                print(f"  OK message_id={msg.id}")
+                await asyncio.sleep(0.8)
+            except Exception as exc:
+                total_failed += 1
+                print(f"  FAIL message_id={msg.id}: {exc}")
+
+    await client.disconnect()
+    print(
+        f"\nانتهى: checked={total_checked}, changed={total_changed}, failed={total_failed}"
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())

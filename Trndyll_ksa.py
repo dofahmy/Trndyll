@@ -103,8 +103,14 @@ LINK_RE = re.compile(r'https?://[^\s\]\)\[\(< >"\'\uFFFC]+'.replace('< >', '<>')
 TRENDYOL_DOMAINS = ("ty.gl", "trendyol.sa", "trendyol.com")
 STANDALONE_OFFE_RE = re.compile(r"(?<!\w)OFFE(?!\w)", re.UNICODE)
 WHATSAPP_JOIN_LINE = "📞 للانضمام لقناتنا على واتساب (اضغط هنا)"
+PUBLIC_DISCOUNT_CODES = {"KSA15"}
+OUR_DISCOUNT_CODE = os.getenv("TRENDYOL_DISCOUNT_CODE", "OFFERZK").strip() or "OFFERZK"
+DISCOUNT_LINE_RE = re.compile(
+    r"(?im)^(?P<prefix>\s*كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(?P<codes>[^\r\n]*)$"
+)
+DISCOUNT_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 DISCOUNT_CODE_RE = re.compile(
-    r"(كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(\S+)"
+    r"(كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(?:`)?([A-Za-z0-9][A-Za-z0-9_-]*)(?:`)?"
 )
 _DB_LOCK = threading.Lock()
 _TIMESTAMP_LOCK = threading.Lock()
@@ -441,6 +447,30 @@ async def replace_trendyol_links(text):
     return "".join(parts), converted, errors
 
 
+def normalize_discount_codes(text):
+    """يحافظ فقط على KSA15 ويضيف كودنا، ويجعل كل كود monospace مستقلًا."""
+    changed_lines = 0
+
+    def replace_line(match):
+        nonlocal changed_lines
+        raw_codes = match.group("codes") or ""
+        tokens = DISCOUNT_TOKEN_RE.findall(raw_codes)
+        upper_tokens = {token.upper() for token in tokens}
+
+        final_codes = []
+        if "KSA15" in upper_tokens:
+            final_codes.append("KSA15")
+        if OUR_DISCOUNT_CODE.upper() not in {code.upper() for code in final_codes}:
+            final_codes.append(OUR_DISCOUNT_CODE)
+
+        replacement = match.group("prefix") + " ".join(f"`{code}`" for code in final_codes)
+        if replacement != match.group(0):
+            changed_lines += 1
+        return replacement
+
+    return DISCOUNT_LINE_RE.sub(replace_line, text or ""), changed_lines
+
+
 def clean_post_text(text):
     """يعدّل كلمة OFFE المستقلة ويحذف سطر الانضمام إلى واتساب."""
     lines = (text or "").splitlines()
@@ -750,7 +780,13 @@ async def process_post(event, messages, post_id, is_edit=False):
     new_text, offe_replacements, removed_whatsapp_lines = clean_post_text(
         new_text
     )
+    new_text, discount_code_replacements = normalize_discount_codes(new_text)
 
+    if discount_code_replacements:
+        print(
+            f"   ✅ تم توحيد أكواد الخصم: الاحتفاظ بـ KSA15 إن وُجد "
+            f"+ إضافة {OUR_DISCOUNT_CODE} ({discount_code_replacements} سطر)"
+        )
     if offe_replacements:
         print(f"   ✅ تم تغيير OFFE إلى OFFERZK ({offe_replacements} مرة)")
     if removed_whatsapp_lines:
