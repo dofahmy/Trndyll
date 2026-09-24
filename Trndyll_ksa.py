@@ -463,7 +463,7 @@ def normalize_discount_codes(text):
         if OUR_DISCOUNT_CODE.upper() not in {code.upper() for code in final_codes}:
             final_codes.append(OUR_DISCOUNT_CODE)
 
-        replacement = match.group("prefix") + " ".join(f"`{code}`" for code in final_codes)
+        replacement = match.group("prefix") + " - ".join(final_codes)
         if replacement != match.group(0):
             changed_lines += 1
         return replacement

@@ -45,7 +45,7 @@ def fix_text(text):
         if current_codes == wanted_codes:
             return match.group(0)
 
-        new_line = match.group("prefix") + " ".join(final)
+        new_line = match.group("prefix") + " - ".join(final)
         changed = True
         return new_line
 
