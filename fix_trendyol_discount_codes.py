@@ -15,7 +15,8 @@ CHANNELS = [
     for x in os.getenv("DESTINATION_CHANNELS", "@KSAOfferzzz").split(",")
     if x.strip()
 ]
-LIMIT = int(os.getenv("FIX_CODES_LIMIT", "0"))  # 0 = كل البوستات المتاحة
+START_MESSAGE_ID = int(os.getenv("FIX_CODES_START_ID", "17116"))
+DAYS_BACK = int(os.getenv("FIX_CODES_DAYS_BACK", "7"))
 
 LINE_RE = re.compile(
     r"(?im)^(?P<prefix>\s*كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(?P<codes>[^\r\n]*)$"
@@ -53,10 +54,26 @@ async def main():
     print(f"الكود الخاص بنا: {OUR_CODE}")
     print("الكود العام الوحيد المحفوظ: KSA15")
 
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)
+
     total_checked = total_changed = total_failed = 0
     for channel in CHANNELS:
-        print(f"\nفحص {channel} ...")
-        async for msg in client.iter_messages(channel, limit=(LIMIT or None)):
+        print(
+            f"\nفحص {channel} من الرسالة {START_MESSAGE_ID} "
+            f"للخلف لمدة {DAYS_BACK} أيام ..."
+        )
+        # reverse=False هو ترتيب Telegram الطبيعي: من الأحدث إلى الأقدم.
+        # max_id غير شامل، لذلك نضيف 1 لكي يبدأ من START_MESSAGE_ID نفسه.
+        async for msg in client.iter_messages(
+            channel,
+            limit=None,
+            max_id=START_MESSAGE_ID + 1,
+            reverse=False,
+        ):
+            if msg.date and msg.date < cutoff:
+                print(f"  وصلنا لحد الأسبوع: {msg.date.isoformat()} — توقف.")
+                break
             total_checked += 1
             old_text = msg.message or ""
             if not old_text or not LINE_RE.search(old_text):
