@@ -110,10 +110,13 @@ TRIGGER_DISCOUNT_CODES = (
     "HANO15",
     "ARWA15",
     "NADA15",
+    "AS915",
     "AS916",
 )
 OUTPUT_DISCOUNT_CODES = tuple(
-    dict.fromkeys(("3VOC15", "KSA15", "AS916", OUR_DISCOUNT_CODE))
+    dict.fromkeys(
+        ("3VOC15", "KSA15", "AS915", "AS916", OUR_DISCOUNT_CODE)
+    )
 )
 KNOWN_DISCOUNT_CODES = tuple(
     dict.fromkeys(TRIGGER_DISCOUNT_CODES + OUTPUT_DISCOUNT_CODES)
