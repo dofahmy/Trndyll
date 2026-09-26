@@ -103,16 +103,43 @@ LINK_RE = re.compile(r'https?://[^\s\]\)\[\(< >"\'\uFFFC]+'.replace('< >', '<>')
 TRENDYOL_DOMAINS = ("ty.gl", "trendyol.sa", "trendyol.com")
 STANDALONE_OFFE_RE = re.compile(r"(?<!\w)OFFE(?!\w)", re.UNICODE)
 WHATSAPP_JOIN_LINE = "📞 للانضمام لقناتنا على واتساب (اضغط هنا)"
-PUBLIC_DISCOUNT_CODES = {"KSA15", "3VOC15"}
-REPLACE_DISCOUNT_CODES = {"ARWA15", "OFFE"}
 OUR_DISCOUNT_CODE = os.getenv("TRENDYOL_DISCOUNT_CODE", "OFFERZK").strip() or "OFFERZK"
-DISCOUNT_LINE_RE = re.compile(
-    r"(?im)^(?P<prefix>\s*كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(?P<codes>[^\r\n]*)$"
+TRIGGER_DISCOUNT_CODES = (
+    "NOHA15",
+    "3VOC15",
+    "HANO15",
+    "ARWA15",
+    "NADA15",
+    "AS916",
+)
+OUTPUT_DISCOUNT_CODES = tuple(
+    dict.fromkeys(("3VOC15", "KSA15", "AS916", OUR_DISCOUNT_CODE))
+)
+KNOWN_DISCOUNT_CODES = tuple(
+    dict.fromkeys(TRIGGER_DISCOUNT_CODES + OUTPUT_DISCOUNT_CODES)
+)
+_TRIGGER_CODES_PATTERN = "|".join(
+    sorted(map(re.escape, TRIGGER_DISCOUNT_CODES), key=len, reverse=True)
+)
+_KNOWN_CODES_PATTERN = "|".join(
+    sorted(map(re.escape, KNOWN_DISCOUNT_CODES), key=len, reverse=True)
+)
+_OUTPUT_CODES_PATTERN = "|".join(
+    sorted(map(re.escape, OUTPUT_DISCOUNT_CODES), key=len, reverse=True)
+)
+TRIGGER_DISCOUNT_CODE_RE = re.compile(
+    rf"(?<![A-Za-z0-9_-])(?:{_TRIGGER_CODES_PATTERN})(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+KNOWN_DISCOUNT_CODE_RE = re.compile(
+    rf"(?<![A-Za-z0-9_-])(?:{_KNOWN_CODES_PATTERN})(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+MONOSPACE_DISCOUNT_CODE_RE = re.compile(
+    rf"(?<![A-Za-z0-9_-])(?:{_OUTPUT_CODES_PATTERN})(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
 )
 DISCOUNT_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
-DISCOUNT_CODE_RE = re.compile(
-    r"(كود[^\S\r\n]+(?:ال)?خصم[^\S\r\n]*[:：][^\S\r\n]*)(?:`)?([A-Za-z0-9][A-Za-z0-9_-]*)(?:`)?"
-)
 _DB_LOCK = threading.Lock()
 _TIMESTAMP_LOCK = threading.Lock()
 _LAST_TIMESTAMP = 0
@@ -449,49 +476,42 @@ async def replace_trendyol_links(text):
 
 
 def normalize_discount_codes(text):
-    """يستبدل فقط ARWA15 وOFFE بكودنا، ويحافظ على أي أكواد أخرى كما هي."""
+    """يستبدل أي سطر يحوي كودًا مستهدفًا بقائمة أكوادنا الموحدة."""
     changed_lines = 0
+    canonical = " - ".join(OUTPUT_DISCOUNT_CODES)
+    canonical_set = {code.upper() for code in OUTPUT_DISCOUNT_CODES}
+    output_lines = []
 
-    def replace_line(match):
-        nonlocal changed_lines
-        raw_codes = match.group("codes") or ""
-        tokens = DISCOUNT_TOKEN_RE.findall(raw_codes)
-        if not tokens:
-            return match.group(0)
+    for original_line in (text or "").splitlines(keepends=True):
+        line_ending = ""
+        line = original_line
+        if line.endswith("\r\n"):
+            line, line_ending = line[:-2], "\r\n"
+        elif line.endswith(("\n", "\r")):
+            line, line_ending = line[:-1], line[-1]
 
-        final_codes = []
-        replaced = False
-        our_added = False
+        token_set = {token.upper() for token in DISCOUNT_TOKEN_RE.findall(line)}
+        if canonical_set.issubset(token_set):
+            output_lines.append(line + line_ending)
+            continue
 
-        for token in tokens:
-            upper = token.upper()
-            if upper in REPLACE_DISCOUNT_CODES:
-                replaced = True
-                if not our_added and OUR_DISCOUNT_CODE.upper() not in {
-                    code.upper() for code in final_codes
-                }:
-                    final_codes.append(OUR_DISCOUNT_CODE)
-                    our_added = True
-                continue
+        if not TRIGGER_DISCOUNT_CODE_RE.search(line):
+            output_lines.append(line + line_ending)
+            continue
 
-            if upper == OUR_DISCOUNT_CODE.upper():
-                if not our_added:
-                    final_codes.append(OUR_DISCOUNT_CODE)
-                    our_added = True
-                continue
+        # إزالة علامات Markdown القديمة حتى لا تظهر كحروف حول الأكواد.
+        plain_line = line.replace("`", "")
+        matches = list(KNOWN_DISCOUNT_CODE_RE.finditer(plain_line))
+        if not matches:
+            output_lines.append(line + line_ending)
+            continue
 
-            # نحافظ على KSA15 و3VOC15 وأي كود آخر غير مستهدف كما هو.
-            if upper not in {code.upper() for code in final_codes}:
-                final_codes.append(token)
-
-        if not replaced:
-            return match.group(0)
-
-        replacement = match.group("prefix") + " - ".join(final_codes)
+        first, last = matches[0], matches[-1]
+        new_line = plain_line[:first.start()] + canonical + plain_line[last.end():]
+        output_lines.append(new_line + line_ending)
         changed_lines += 1
-        return replacement
 
-    return DISCOUNT_LINE_RE.sub(replace_line, text or ""), changed_lines
+    return "".join(output_lines), changed_lines
 
 def clean_post_text(text):
     """يعدّل كلمة OFFE المستقلة ويحذف سطر الانضمام إلى واتساب."""
@@ -564,8 +584,8 @@ def build_message_entities(text, include_custom=True):
     entities = []
     protected_ranges = []
 
-    for match in DISCOUNT_CODE_RE.finditer(source_text):
-        start, end = match.span(2)
+    for match in MONOSPACE_DISCOUNT_CODE_RE.finditer(source_text):
+        start, end = match.span()
         protected_ranges.append((start, end))
         entities.append(
             MessageEntityCode(
@@ -806,14 +826,15 @@ async def process_post(event, messages, post_id, is_edit=False):
 
     if discount_code_replacements:
         print(
-            f"   ✅ تم استبدال ARWA15/OFFE بـ {OUR_DISCOUNT_CODE} فقط "
-            f"مع الحفاظ على باقي الأكواد ({discount_code_replacements} سطر)"
+            "   ✅ تم توحيد أكواد الخصم إلى: "
+            f"{' - '.join(OUTPUT_DISCOUNT_CODES)} "
+            f"({discount_code_replacements} سطر)"
         )
     if offe_replacements:
         print(f"   ✅ تم تغيير OFFE إلى OFFERZK ({offe_replacements} مرة)")
     if removed_whatsapp_lines:
         print(f"   ✅ تم حذف سطر واتساب ({removed_whatsapp_lines} مرة)")
-    discount_code_count = len(DISCOUNT_CODE_RE.findall(new_text))
+    discount_code_count = len(MONOSPACE_DISCOUNT_CODE_RE.findall(new_text))
     if discount_code_count:
         print(f"   ✅ تم تنسيق كود الخصم monospace ({discount_code_count} مرة)")
 
